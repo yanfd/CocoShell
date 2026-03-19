@@ -1,0 +1,33 @@
+{
+  "name": "cocoshell",
+  "version": "0.1.0",
+  "description": "Beautiful terminal output for any script — zero modifications required",
+  "type": "module",
+  "bin": {
+    "cocoshell": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "cli",
+    "terminal",
+    "shell",
+    "tui",
+    "beautiful"
+  ]
+}
