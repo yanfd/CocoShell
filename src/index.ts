@@ -53,21 +53,86 @@ function resetSilenceTimer() {
   }, theme.silenceThreshold);
 }
 
-// Strip ANSI escape sequences for classification, but keep for passthrough
 function stripAnsi(s: string): string {
   return s.replace(/\x1B\[[\d;]*[A-Za-z]|\x1B[()][AB012]|\x1B[=>]/g, '');
 }
 
-// Detect if a line is purely a terminal control sequence (cursor movement, clear, etc.)
 const CONTROL_ONLY_RE = /^(\x1B\[[\d;]*[A-Za-z]|\x1B[()][AB012]|\r|\x1B[=>])*$/;
+
+// Visual width of a string (accounts for wide chars like CJK/emoji = 2 cols)
+function visualWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0;
+    // CJK, emoji, wide blocks
+    if (
+      (cp >= 0x1100 && cp <= 0x115F) ||
+      (cp >= 0x2E80 && cp <= 0x303E) ||
+      (cp >= 0x3040 && cp <= 0xA4CF) ||
+      (cp >= 0xAC00 && cp <= 0xD7A3) ||
+      (cp >= 0xF900 && cp <= 0xFAFF) ||
+      (cp >= 0xFE10 && cp <= 0xFE1F) ||
+      (cp >= 0xFE30 && cp <= 0xFE4F) ||
+      (cp >= 0xFF00 && cp <= 0xFF60) ||
+      (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+      (cp >= 0x1F300 && cp <= 0x1FBFF)
+    ) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
+// Wrap a plain string to maxWidth, return array of lines
+function wrapText(text: string, maxWidth: number): string[] {
+  if (visualWidth(text) <= maxWidth) return [text];
+  const lines: string[] = [];
+  let cur = '';
+  let curW = 0;
+  for (const ch of text) {
+    const cw = visualWidth(ch);
+    if (curW + cw > maxWidth) {
+      lines.push(cur);
+      cur = ch;
+      curW = cw;
+    } else {
+      cur += ch;
+      curW += cw;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function getWidth(): number {
+  return Math.min(process.stdout.columns || 80, 100);
+}
+
+// │ ⏺ <content>  — content area width = WIDTH - 2(border+space) - 3(dot+spaces)
+function printFormattedLine(dot: string, rendered: string, clean: string) {
+  const WIDTH = getWidth();
+  const CONTENT_WIDTH = WIDTH - 6;
+  const border = chalk.hex(theme.colors.border)('│');
+
+  const wrapped = wrapText(clean, CONTENT_WIDTH);
+  wrapped.forEach((seg, i) => {
+    if (i === 0) {
+      // Re-classify and render only the first segment (truncated clean text)
+      const { rendered: r } = parseLine(seg);
+      console.log(`${border} ${dot} ${r}`);
+    } else {
+      console.log(`${border}    ${chalk.hex(theme.colors.muted)(seg)}`);
+    }
+  });
+}
 
 function flushLine(raw: string) {
   const clean = stripAnsi(raw);
 
-  // Pass through blank lines and pure control sequences without classifying
   if (clean.trim() === '' || CONTROL_ONLY_RE.test(raw)) {
     if (spinner.isActive()) spinner.stop();
-    if (clean.trim() !== '') process.stdout.write(raw + '\n');
     resetSilenceTimer();
     return;
   }
@@ -75,8 +140,8 @@ function flushLine(raw: string) {
   if (spinner.isActive()) spinner.stop();
   if (silenceTimer) clearTimeout(silenceTimer);
 
-  const { rendered } = parseLine(clean);
-  console.log('  ' + rendered);
+  const { dot, rendered } = parseLine(clean);
+  printFormattedLine(dot, rendered, clean);
 
   resetSilenceTimer();
 }
@@ -96,6 +161,39 @@ const child = pty.spawn(cmd, cmdArgs, {
 
 let buf = '';
 let passthroughMode = false;
+// currentLine simulates terminal line buffer for \r overwrite behavior
+let currentLine = '';
+
+function processChunk(data: string) {
+  let i = 0;
+  while (i < data.length) {
+    const ch = data[i];
+    if (ch === '\n') {
+      flushLine(currentLine);
+      currentLine = '';
+      i++;
+    } else if (ch === '\r') {
+      // Check if followed by \n (Windows CRLF)
+      if (data[i + 1] === '\n') {
+        flushLine(currentLine);
+        currentLine = '';
+        i += 2;
+      } else {
+        // Pure \r: overwrite current line (git progress style)
+        // Flush the current line as a progress update, then reset
+        const clean = stripAnsi(currentLine).trim();
+        if (clean) {
+          // Only keep last \r-overwritten version — overwrite in place
+          currentLine = '';
+        }
+        i++;
+      }
+    } else {
+      currentLine += ch;
+      i++;
+    }
+  }
+}
 
 child.onData((data: string) => {
   // Detect alternate screen (full-screen TUI like vim, fzf, etc.)
@@ -114,16 +212,11 @@ child.onData((data: string) => {
     return;
   }
 
-  buf += data;
-  const lines = buf.split('\n');
-  buf = lines.pop() ?? '';
-  for (const line of lines) {
-    flushLine(line);
-  }
+  processChunk(data);
 });
 
 child.onExit(({ exitCode }: { exitCode: number }) => {
-  if (buf.length > 0) flushLine(buf);
+  if (currentLine.trim()) flushLine(currentLine);
   if (spinner.isActive()) spinner.stop();
   if (silenceTimer) clearTimeout(silenceTimer);
 
